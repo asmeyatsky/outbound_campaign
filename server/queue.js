@@ -6,9 +6,11 @@ const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
 
 const scraperQueue = new Queue('scraper-jobs', { connection });
 const outreachQueue = new Queue('outreach-jobs', { connection });
+const monitorQueue = new Queue('monitor-jobs', { connection });
 
 module.exports = {
     scraperQueue,
     outreachQueue,
+    monitorQueue,
     connection
 };

@@ -3,6 +3,7 @@ const { connection } = require('./queue');
 const { searchShops, getPlaceDetails, findEmailOnWebsite } = require('./scraper');
 const { generatePersonalizedHook } = require('./llm');
 const { sendEmail } = require('./gmail');
+const { checkThreadForReply } = require('./gmail-tracker');
 const { db } = require('./db');
 const puppeteer = require('puppeteer');
 
@@ -63,13 +64,18 @@ const scraperWorker = new Worker('scraper-jobs', async job => {
 
 // Outreach Worker
 const outreachWorker = new Worker('outreach-jobs', async job => {
-    const { leadId, tokens } = job.data;
+    const { leadId, tokens, isFollowup } = job.data;
     const lead = await db('leads').where({ id: leadId }).first();
 
-    if (!lead || !lead.email) return;
+    if (!lead || !lead.email || lead.status === 'unsubscribed') return;
 
-    const subject = `Listing ${lead.name} on the new Gear Rental Marketplace`;
-    const body = `
+    const subject = isFollowup
+        ? `Re: Listing ${lead.name} on the new Gear Rental Marketplace`
+        : `Listing ${lead.name} on the new Gear Rental Marketplace`;
+
+    const body = isFollowup
+        ? `Hi ${lead.name} team,<br><br>Just following up on my previous note. We'd love to help you monetize your idle gear. Any interest in a quick chat?<br><br>Best,<br>Allan`
+        : `
     Hi there,<br><br>
     I’m Allan, founder of a new P2P gear rental platform. 
     ${lead.ai_hook || `I noticed ${lead.name} has an impressive inventory.`}<br><br>
@@ -78,28 +84,62 @@ const outreachWorker = new Worker('outreach-jobs', async job => {
     Check out our staging environment here: <a href="https://smeyatsky.com/gear-staging">https://smeyatsky.com/gear-staging</a><br><br>
     Best,<br>
     Allan<br><br>
-    <small><i>If you'd rather not hear from us, reply 'Unsubscribe' and we will remove ${lead.name} immediately.</i></small>
+    <small><i>If you'd rather not hear from us, <a href="${process.env.APP_URL || 'http://localhost:5000'}/api/unsubscribe?email=${encodeURIComponent(lead.email)}">click here to unsubscribe</a> and we will remove ${lead.name} immediately.</i></small>
   `;
 
     try {
         const result = await sendEmail(tokens, lead.email, subject, body);
 
         await db('leads').where({ id: leadId }).update({
-            status: 'sent'
+            status: isFollowup ? 'followup_sent' : 'sent'
         });
 
         await db('campaigns').insert({
             lead_id: leadId,
-            status: 'sent',
+            status: isFollowup ? 'followup_sent' : 'sent',
             thread_id: result.threadId,
             sent_at: db.fn.now()
         });
 
-        console.log(`Email sent to ${lead.email} for ${lead.name}`);
+        console.log(`${isFollowup ? 'Follow-up' : 'Email'} sent to ${lead.email}`);
     } catch (error) {
         console.error(`Failed to send email to ${lead.email}:`, error);
         await db('leads').where({ id: leadId }).update({ status: 'failed' });
         throw error;
+    }
+}, { connection });
+
+// Monitor Worker (Runs every hour to check responses and trigger follow-ups)
+const monitorWorker = new Worker('monitor-jobs', async job => {
+    const { tokens } = job.data;
+    console.log('Running monitor job...');
+
+    const activeCampaigns = await db('campaigns').whereIn('status', ['sent', 'followup_sent']);
+
+    for (const campaign of activeCampaigns) {
+        const hasReply = await checkThreadForReply(tokens, campaign.thread_id);
+
+        if (hasReply) {
+            await db('campaigns').where({ id: campaign.id }).update({ status: 'replied' });
+            await db('leads').where({ id: campaign.lead_id }).update({ status: 'replied' });
+            console.log(`Lead ${campaign.lead_id} replied!`);
+        } else {
+            // Logic for automated follow-up (e.g., after 3 days)
+            const sentAt = new Date(campaign.sent_at);
+            const now = new Date();
+            const diffDays = Math.ceil(Math.abs(now - sentAt) / (1000 * 60 * 60 * 24));
+
+            if (diffDays >= 3 && campaign.status === 'sent') {
+                // Trigger follow-up if not already done
+                const { outreachQueue } = require('./queue');
+                await outreachQueue.add(`followup-${campaign.lead_id}`, {
+                    leadId: campaign.lead_id,
+                    tokens,
+                    isFollowup: true
+                });
+                console.log(`Queued follow-up for lead ${campaign.lead_id}`);
+            }
+        }
     }
 }, { connection });
 

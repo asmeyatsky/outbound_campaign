@@ -5,7 +5,7 @@ const morgan = require('morgan');
 const path = require('path');
 const { initDb, db } = require('./db');
 const { searchShops, getPlaceDetails, findEmailOnWebsite } = require('./scraper');
-const { scraperQueue, outreachQueue } = require('./queue');
+const { scraperQueue, outreachQueue, monitorQueue } = require('./queue');
 const { getAuthUrl, getTokens, sendEmail } = require('./gmail');
 const { createBullBoard } = require('@bull-board/api');
 const { BullMQAdapter } = require('@bull-board/api/bullMQAdapter');
@@ -22,7 +22,11 @@ app.use(express.json());
 const serverAdapter = new ExpressAdapter();
 serverAdapter.setBasePath('/admin/queues');
 createBullBoard({
-    queues: [new BullMQAdapter(scraperQueue), new BullMQAdapter(outreachQueue)],
+    queues: [
+        new BullMQAdapter(scraperQueue),
+        new BullMQAdapter(outreachQueue),
+        new BullMQAdapter(monitorQueue)
+    ],
     serverAdapter: serverAdapter,
 });
 app.use('/admin/queues', serverAdapter.getRouter());
@@ -51,9 +55,28 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const { code } = req.query;
     try {
         userTokens = await getTokens(code);
-        res.send('Authentication successful! You can close this tab.');
+
+        // Start monitoring job once authenticated (runs every hour)
+        await monitorQueue.add('check-responses', { tokens: userTokens }, {
+            repeat: { every: 3600000 }
+        });
+
+        res.send('Authentication successful! Monitoring started. You can close this tab.');
     } catch (error) {
         res.status(500).send('Authentication failed.');
+    }
+});
+
+// Unsubscribe Route
+app.get('/api/unsubscribe', async (req, res) => {
+    const { email } = req.query;
+    if (!email) return res.status(400).send('Email is required');
+
+    try {
+        await db('leads').where({ email }).update({ status: 'unsubscribed' });
+        res.send('You have been successfully unsubscribed.');
+    } catch (error) {
+        res.status(500).send('Error processing unsubscribe request.');
     }
 });
 
