@@ -1,5 +1,4 @@
-const { Worker } = require('bullmq');
-const { connection } = require('./queue');
+const { scraperQueue, outreachQueue, monitorQueue } = require('./queue');
 const { searchShops, getPlaceDetails, findEmailOnWebsite } = require('./scraper');
 const { generatePersonalizedHook } = require('./llm');
 const { sendEmail } = require('./gmail');
@@ -7,8 +6,8 @@ const { checkThreadForReply } = require('./gmail-tracker');
 const { db } = require('./db');
 const puppeteer = require('puppeteer');
 
-// Scraper Worker
-const scraperWorker = new Worker('scraper-jobs', async job => {
+// Scraper Worker Processor
+async function processScraperJob(job) {
     const { city } = job.data;
     console.log(`Working on scrape job for ${city}`);
 
@@ -21,9 +20,6 @@ const scraperWorker = new Worker('scraper-jobs', async job => {
             const page = await browser.newPage();
 
             for (const shop of shops) {
-                // Update progress
-                await job.updateProgress((shops.indexOf(shop) / shops.length) * 100);
-
                 const details = await getPlaceDetails(shop.place_id);
                 if (details && details.website) {
                     const email = await findEmailOnWebsite(details.website);
@@ -60,10 +56,10 @@ const scraperWorker = new Worker('scraper-jobs', async job => {
         console.error(`Scraper job ${job.id} failed:`, error);
         throw error;
     }
-}, { connection });
+}
 
-// Outreach Worker
-const outreachWorker = new Worker('outreach-jobs', async job => {
+// Outreach Worker Processor
+async function processOutreachJob(job) {
     const { leadId, tokens, isFollowup } = job.data;
     const lead = await db('leads').where({ id: leadId }).first();
 
@@ -77,7 +73,7 @@ const outreachWorker = new Worker('outreach-jobs', async job => {
         ? `Hi ${lead.name} team,<br><br>Just following up on my previous note. We'd love to help you monetize your idle gear. Any interest in a quick chat?<br><br>Best,<br>Allan`
         : `
     Hi there,<br><br>
-    I’m Allan, founder of a new P2P gear rental platform. 
+    I'm Allan, founder of a new P2P gear rental platform. 
     ${lead.ai_hook || `I noticed ${lead.name} has an impressive inventory.`}<br><br>
     We want to help you <b>monetize your idle inventory</b> by putting it in front of local creators. 
     We have a bulk upload tool ready so you can list your entire catalog in minutes.<br><br>
@@ -107,10 +103,10 @@ const outreachWorker = new Worker('outreach-jobs', async job => {
         await db('leads').where({ id: leadId }).update({ status: 'failed' });
         throw error;
     }
-}, { connection });
+}
 
-// Monitor Worker (Runs every hour to check responses and trigger follow-ups)
-const monitorWorker = new Worker('monitor-jobs', async job => {
+// Monitor Worker Processor (Runs every hour to check responses and trigger follow-ups)
+async function processMonitorJob(job) {
     const { tokens } = job.data;
     console.log('Running monitor job...');
 
@@ -131,7 +127,6 @@ const monitorWorker = new Worker('monitor-jobs', async job => {
 
             if (diffDays >= 3 && campaign.status === 'sent') {
                 // Trigger follow-up if not already done
-                const { outreachQueue } = require('./queue');
                 await outreachQueue.add(`followup-${campaign.lead_id}`, {
                     leadId: campaign.lead_id,
                     tokens,
@@ -141,6 +136,11 @@ const monitorWorker = new Worker('monitor-jobs', async job => {
             }
         }
     }
-}, { connection });
+}
+
+// Set up processors for each queue
+scraperQueue.setProcessor(processScraperJob);
+outreachQueue.setProcessor(processOutreachJob);
+monitorQueue.setProcessor(processMonitorJob);
 
 console.log('Workers started...');

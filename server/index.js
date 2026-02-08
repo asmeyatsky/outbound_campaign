@@ -7,9 +7,7 @@ const { initDb, db } = require('./db');
 const { searchShops, getPlaceDetails, findEmailOnWebsite } = require('./scraper');
 const { scraperQueue, outreachQueue, monitorQueue } = require('./queue');
 const { getAuthUrl, getTokens, sendEmail } = require('./gmail');
-const { createBullBoard } = require('@bull-board/api');
-const { BullMQAdapter } = require('@bull-board/api/bullMQAdapter');
-const { ExpressAdapter } = require('@bull-board/express');
+// Bull Board removed - using simple queue system
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -18,18 +16,36 @@ app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
 
-// Bull Board UI for queue monitoring
-const serverAdapter = new ExpressAdapter();
-serverAdapter.setBasePath('/admin/queues');
-createBullBoard({
-    queues: [
-        new BullMQAdapter(scraperQueue),
-        new BullMQAdapter(outreachQueue),
-        new BullMQAdapter(monitorQueue)
-    ],
-    serverAdapter: serverAdapter,
+// Simple queue status endpoint
+app.get('/admin/queues', (req, res) => {
+    const scraperJobs = scraperQueue.getJobs();
+    const outreachJobs = outreachQueue.getJobs();
+    const monitorJobs = monitorQueue.getJobs();
+    
+    res.json({
+        scraper: {
+            total: scraperJobs.length,
+            waiting: scraperJobs.filter(j => j.status === 'waiting').length,
+            processing: scraperJobs.filter(j => j.status === 'processing').length,
+            completed: scraperJobs.filter(j => j.status === 'completed').length,
+            failed: scraperJobs.filter(j => j.status === 'failed').length
+        },
+        outreach: {
+            total: outreachJobs.length,
+            waiting: outreachJobs.filter(j => j.status === 'waiting').length,
+            processing: outreachJobs.filter(j => j.status === 'processing').length,
+            completed: outreachJobs.filter(j => j.status === 'completed').length,
+            failed: outreachJobs.filter(j => j.status === 'failed').length
+        },
+        monitor: {
+            total: monitorJobs.length,
+            waiting: monitorJobs.filter(j => j.status === 'waiting').length,
+            processing: monitorJobs.filter(j => j.status === 'processing').length,
+            completed: monitorJobs.filter(j => j.status === 'completed').length,
+            failed: monitorJobs.filter(j => j.status === 'failed').length
+        }
+    });
 });
-app.use('/admin/queues', serverAdapter.getRouter());
 
 // Scraper Route
 app.post('/api/scrape', async (req, res) => {
